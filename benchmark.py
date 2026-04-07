@@ -11,12 +11,12 @@ def generate_noise(samples):
     return np.random.uniform(-10.0, 10.0, samples).astype(np.float32)
 
 
-def worker_influx(sensor_id, samples, start_ns):
+def worker_influx(sensor_id, samples, start_ns, strategy):
     payload = generate_noise(samples)
     client = InfluxClientAPI()
     t0 = time.time()
     try:
-        client.insert(sensor_id, start_ns, payload)
+        client.insert(sensor_id, start_ns, payload, cs_strategy=strategy)
         client.wait_flush()
         client.close()
     except Exception as e:
@@ -24,23 +24,23 @@ def worker_influx(sensor_id, samples, start_ns):
     return sensor_id, True, time.time() - t0, ""
 
 
-def worker_quest(sensor_id, samples, start_ns):
+def worker_quest(sensor_id, samples, start_ns, strategy):
     payload = generate_noise(samples)
     client = QuestClientAPI()
     t0 = time.time()
     try:
-        client.insert(sensor_id, start_ns, payload)
+        client.insert(sensor_id, start_ns, payload, cs_strategy=strategy)
     except Exception as e:
         return sensor_id, False, time.time() - t0, str(e)
     return sensor_id, True, time.time() - t0, ""
 
 
-def worker_clickhouse(sensor_id, samples, start_ns):
+def worker_clickhouse(sensor_id, samples, start_ns, strategy):
     payload = generate_noise(samples)
     client = ClickHouseClientAPI()
     t0 = time.time()
     try:
-        client.insert(sensor_id, start_ns, payload)
+        client.insert(sensor_id, start_ns, payload, cs_strategy=strategy)
     except Exception as e:
         return sensor_id, False, time.time() - t0, str(e)
     return sensor_id, True, time.time() - t0, ""
@@ -72,6 +72,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sensors', type=int, default=10)
     parser.add_argument('--mb-per-sensor', type=int, default=50) # Reduced default scale for testing speed. Pass 100 for true payload.
+    parser.add_argument('--cs-strategy', type=str, choices=['raw', 'eager', 'idle', 'query'], default='raw')
     args = parser.parse_args()
     
     # 1 float32 takes 4 bytes, so (MB * 1024 * 1024) / 4 gives the sample count
@@ -105,7 +106,7 @@ def main():
             for i in range(args.sensors):
                 # sensor id mappings 
                 sensor_id = f"sensor_{target_db}_{i}"
-                futures.append(executor.submit(worker_fn, sensor_id, samples_per_sensor, start_ns))
+                futures.append(executor.submit(worker_fn, sensor_id, samples_per_sensor, start_ns, args.cs_strategy))
             
             for future in concurrent.futures.as_completed(futures):
                 s_id, ok, elapsed, err = future.result()
