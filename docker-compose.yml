@@ -5,19 +5,17 @@ services:
     image: influxdb:2.7
     container_name: iot_influxdb
     ports:
-      # Bind exclusively to localhost to prevent public exposure
       - "127.0.0.1:8086:8086"
     volumes:
-      # Using external named volumes for persistent data independently of container lifecycle
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USER:?err}
-      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:?err}
-      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:?err}
-      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:?err}
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN:?err}
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-SuperSecretPassword123!}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-iot_engineering}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-vibration_data}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN:-Th1s-Is-A-S3cr3t-T0k3n-F0r-V1br4t10n-An4lys1s}
     networks:
       - vibration_net
     healthcheck:
@@ -30,11 +28,8 @@ services:
     image: questdb/questdb:latest
     container_name: iot_questdb
     ports:
-      # REST API & Web UI
       - "127.0.0.1:9000:9000"
-      # InfluxDB Line Protocol (ILP) - optimized for high-throughput ingestion
       - "127.0.0.1:9009:9009"
-      # PostgreSQL wire protocol
       - "127.0.0.1:8812:8812"
     volumes:
       - questdb_data:/var/lib/questdb
@@ -51,11 +46,45 @@ services:
     container_name: iot_mosquitto
     ports:
       - "127.0.0.1:1883:1883"
-      - "127.0.0.1:9002:9002"
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto_data:/mosquitto/data
       - mosquitto_log:/mosquitto/log
+    networks:
+      - vibration_net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: iot_clickhouse
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9001:9000"
+      - "127.0.0.1:9010:9009"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_log:/var/log/clickhouse-server
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-admin}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-SuperSecretPassword123!}
+    networks:
+      - vibration_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: iot_postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=secretpswd
+      - POSTGRES_DB=iot_metadata
     networks:
       - vibration_net
 
@@ -67,20 +96,23 @@ services:
     command: ["python", "mqtt_bridge.py"]
     depends_on:
       - mosquitto
+      - clickhouse
       - influxdb
       - questdb
-      - clickhouse
     environment:
       - MQTT_HOST=mosquitto
       - INFLUX_HOST=influxdb
       - QUEST_HOST=questdb
       - CH_HOST=clickhouse
+      - PG_HOST=postgres
+      - PG_USER=postgres
+      - PG_PASSWORD=secretpswd
       - DO_INGESTION=true
     networks:
       - vibration_net
 
   mqtt_publisher:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile.iot
     container_name: iot_mqtt_publisher
@@ -92,38 +124,39 @@ services:
     networks:
       - vibration_net
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: iot_clickhouse
-    ports:
-      # HTTP interface (REST / Play UI)
-      - "127.0.0.1:8123:8123"
-      # Native client port (mapped to 9001 on Host to avoid conflict with QuestDB)
-      - "127.0.0.1:9001:9000"
-      # Inter-server replication port (mapped to 9010 on Host to avoid conflicts)
-      - "127.0.0.1:9010:9009"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - clickhouse_log:/var/log/clickhouse-server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: iot_api
+    depends_on:
+      - postgres
+      - clickhouse
     environment:
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:?err}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?err}
+      - PG_USER=postgres
+      - PG_PASSWORD=secretpswd
+      - PG_HOST=postgres
+      - CH_HOST=clickhouse
     networks:
       - vibration_net
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: iot_frontend
+    ports:
+      - "127.0.0.1:80:80"
+    depends_on:
+      - api
+    networks:
+      - vibration_net
 
 networks:
   vibration_net:
-    # Dedicated internal bridge network for fast, isolated inter-container communication
     driver: bridge
 
 volumes:
-  # Explicitly defining that these volumes must be created externally
-  # This prevents data layer destruction on simple `docker compose down -v`
   influxdb_data:
     external: true
   influxdb_config:
@@ -137,4 +170,6 @@ volumes:
   mosquitto_data:
     external: true
   mosquitto_log:
+    external: true
+  postgres_data:
     external: true
