@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: iot_influxdb
+    ports:
+      # Bind exclusively to localhost to prevent public exposure
+      - "127.0.0.1:8086:8086"
+    volumes:
+      # Using external named volumes for persistent data independently of container lifecycle
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USER:?err}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:?err}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:?err}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:?err}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN:?err}
+    networks:
+      - vibration_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  questdb:
+    image: questdb/questdb:latest
+    container_name: iot_questdb
+    ports:
+      # REST API & Web UI
+      - "127.0.0.1:9000:9000"
+      # InfluxDB Line Protocol (ILP) - optimized for high-throughput ingestion
+      - "127.0.0.1:9009:9009"
+      # PostgreSQL wire protocol
+      - "127.0.0.1:8812:8812"
+    volumes:
+      - questdb_data:/var/lib/questdb
+    networks:
+      - vibration_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: iot_mosquitto
+    ports:
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:9002:9002"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks:
+      - vibration_net
+
+  mqtt_bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.iot
+    container_name: iot_mqtt_bridge
+    command: ["python", "mqtt_bridge.py"]
+    depends_on:
+      - mosquitto
+      - influxdb
+      - questdb
+      - clickhouse
+    environment:
+      - MQTT_HOST=mosquitto
+      - INFLUX_HOST=influxdb
+      - QUEST_HOST=questdb
+      - CH_HOST=clickhouse
+      - DO_INGESTION=true
+    networks:
+      - vibration_net
+
+  mqtt_publisher:
+    build: 
+      context: .
+      dockerfile: Dockerfile.iot
+    container_name: iot_mqtt_publisher
+    command: ["python", "sensor_publisher.py"]
+    depends_on:
+      - mosquitto
+    environment:
+      - MQTT_HOST=mosquitto
+    networks:
+      - vibration_net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: iot_clickhouse
+    ports:
+      # HTTP interface (REST / Play UI)
+      - "127.0.0.1:8123:8123"
+      # Native client port (mapped to 9001 on Host to avoid conflict with QuestDB)
+      - "127.0.0.1:9001:9000"
+      # Inter-server replication port (mapped to 9010 on Host to avoid conflicts)
+      - "127.0.0.1:9010:9009"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_log:/var/log/clickhouse-server
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:?err}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?err}
+    networks:
+      - vibration_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  vibration_net:
+    # Dedicated internal bridge network for fast, isolated inter-container communication
+    driver: bridge
+
+volumes:
+  # Explicitly defining that these volumes must be created externally
+  # This prevents data layer destruction on simple `docker compose down -v`
+  influxdb_data:
+    external: true
+  influxdb_config:
+    external: true
+  questdb_data:
+    external: true
+  clickhouse_data:
+    external: true
+  clickhouse_log:
+    external: true
+  mosquitto_data:
+    external: true
+  mosquitto_log:
+    external: true
